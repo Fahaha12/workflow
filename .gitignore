@@ -25,3 +25,11 @@ output/
 # 测试文件
 test_files/
 temp/
+
+# PyInstaller 打包
+build/
+dist/
+*.spec
+
+# 上传文件
+uploads/

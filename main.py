@@ -80,10 +80,8 @@ def main():
         log_file = output_dir / 'review.log'
         setup_logger(log_level, str(log_file))
         
-        logger.info("=" * 60)
         logger.info("AI文档审核系统启动")
-        logger.info("=" * 60)
-        logger.info(f"配置信息:\n{config}")
+        logger.debug(f"配置: {config}")
         
         # 验证配置
         if not args.ocr_only and not args.parse_only:
@@ -100,9 +98,7 @@ def main():
         # 1. OCR处理附件
         ocr_results = []
         if args.attachments or args.attachment_file:
-            logger.info("\n" + "=" * 60)
-            logger.info("步骤 1: OCR处理附件")
-            logger.info("=" * 60)
+            logger.info("[1/3] OCR处理附件...")
             
             ocr_processor = OCRProcessor(tesseract_path=config.tesseract_path)
             
@@ -133,9 +129,7 @@ def main():
         # 2. 解析Word文档
         doc_result = None
         if args.docx:
-            logger.info("\n" + "=" * 60)
-            logger.info("步骤 2: 解析Word文档")
-            logger.info("=" * 60)
+            logger.info("[2/3] 解析Word文档...")
             
             docx_path = Path(args.docx)
             if not docx_path.exists():
@@ -156,9 +150,7 @@ def main():
         
         # 3. AI审核
         if doc_result and ocr_results:
-            logger.info("\n" + "=" * 60)
-            logger.info("步骤 3: AI审核比对")
-            logger.info("=" * 60)
+            logger.info("[3/3] AI审核比对...")
             
             ai_config = config.get_ai_config()
             reviewer = AIReviewer(**ai_config)
@@ -174,16 +166,9 @@ def main():
             report_path = output_dir / 'review_report'
             reviewer.generate_report(review_result, str(report_path))
             
-            logger.info("\n" + "=" * 60)
-            logger.info("审核完成！")
-            logger.info("=" * 60)
-            logger.info(f"发现问题总数: {review_result['summary']['total_issues']}")
-            logger.info(f"  - 高严重性: {review_result['summary']['high_severity']}")
-            logger.info(f"  - 中严重性: {review_result['summary']['medium_severity']}")
-            logger.info(f"  - 低严重性: {review_result['summary']['low_severity']}")
-            logger.info(f"\n报告已保存到: {output_dir}")
-            logger.info(f"  - JSON: {report_path}.json")
-            logger.info(f"  - Markdown: {report_path}.md")
+            summary = review_result['summary']
+            logger.info(f"审核完成! 问题: {summary['total_issues']} (高:{summary['high_severity']} 中:{summary['medium_severity']} 低:{summary['low_severity']})")
+            logger.info(f"报告: {report_path}.json / .md")
         
         elif not doc_result and not args.ocr_only:
             logger.error("未指定Word文档，请使用 --docx 参数")
