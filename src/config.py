@@ -35,6 +35,7 @@ class Config:
         
         self.dashscope_api_key = os.getenv('DASHSCOPE_API_KEY')
         self.qwen_model = os.getenv('QWEN_MODEL', 'qwen-max')
+        self.qwen_vl_model = os.getenv('QWEN_VL_MODEL', 'qwen3-vl-plus')  # 视觉模型
         
         self.use_local_api = os.getenv('USE_LOCAL_API', 'false').lower() == 'true'
         self.local_api_url = os.getenv('LOCAL_API_URL', 'http://localhost:11434/v1')
@@ -64,6 +65,7 @@ class Config:
                 'api_type': 'qwen',
                 'api_key': self.dashscope_api_key,
                 'model': self.qwen_model,
+                'vl_model': self.qwen_vl_model,
                 'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1'
             }
         elif self.anthropic_api_key:
@@ -98,9 +100,11 @@ class Config:
     def __repr__(self):
         """配置信息字符串表示"""
         ai_config = self.get_ai_config()
+        vl_model = ai_config.get('vl_model', 'N/A')
         return (
             f"Config(\n"
-            f"  AI: {ai_config['api_type']} - {ai_config['model']}\n"
+            f"  AI文本模型: {ai_config['api_type']} - {ai_config['model']}\n"
+            f"  AI视觉模型: {vl_model}\n"
             f"  Output: {self.output_dir}\n"
             f"  Log Level: {self.log_level}\n"
             f")"

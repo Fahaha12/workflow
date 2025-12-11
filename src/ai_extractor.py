@@ -282,7 +282,7 @@ class AIExtractor:
     
     def _regex_extract_section1(self, text: str) -> Dict[str, Any]:
         """正则提取第一部分信息（降级方案）"""
-        phones = list(set(re.findall(r'1[3-9]\d{9}', text)))
+        phones = list(set(re.findall(r'(?<!\d)1[3-9]\d{9}(?!\d)', text)))
         amounts = list(set(re.findall(r'¥?\s*\d+\.?\d*\s*元', text)))
         dates = list(set(re.findall(r'\d{4}[-年]\d{1,2}[-月]\d{1,2}[日]?', text)))
         
@@ -311,7 +311,7 @@ class AIExtractor:
             content = ocr_result.get('content', '')
             
             # 提取号码
-            phones = list(set(re.findall(r'1[3-9]\d{9}', content)))
+            phones = list(set(re.findall(r'(?<!\d)1[3-9]\d{9}(?!\d)', content)))
             # 提取金额
             amounts = list(set(re.findall(r'¥?\s*\d+\.?\d*\s*元', content)))
             # 提取日期

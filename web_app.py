@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file, Response
 from werkzeug.utils import secure_filename
+import unicodedata
+import uuid
 import logging
 from io import BytesIO
 
@@ -56,6 +58,51 @@ def allowed_file(filename, allowed_extensions):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
 
 
+def safe_filename(filename):
+    """
+    安全处理文件名，保留中文字符
+    
+    Args:
+        filename: 原始文件名
+        
+    Returns:
+        安全的文件名（保留中文）
+    """
+    if not filename:
+        return f"file_{uuid.uuid4().hex[:8]}"
+    
+    # 分离文件名和扩展名
+    if '.' in filename:
+        name, ext = filename.rsplit('.', 1)
+        ext = '.' + ext.lower()
+    else:
+        name = filename
+        ext = ''
+    
+    # 规范化Unicode字符
+    name = unicodedata.normalize('NFKC', name)
+    
+    # 移除危险字符，但保留中文、字母、数字、下划线、连字符
+    safe_chars = []
+    for char in name:
+        if char.isalnum() or char in '-_' or '\u4e00' <= char <= '\u9fff':
+            safe_chars.append(char)
+        elif char in ' ':
+            safe_chars.append('_')
+    
+    safe_name = ''.join(safe_chars).strip('_-')
+    
+    # 如果处理后为空，使用UUID
+    if not safe_name:
+        safe_name = f"file_{uuid.uuid4().hex[:8]}"
+    
+    # 限制文件名长度
+    if len(safe_name) > 100:
+        safe_name = safe_name[:100]
+    
+    return safe_name + ext
+
+
 @app.route('/')
 def index():
     """主页"""
@@ -97,21 +144,23 @@ def upload_files():
         if not allowed_file(docx_file.filename, ALLOWED_DOCX):
             return jsonify({'success': False, 'error': 'Word文档格式不支持'})
         
-        # 保存Word文档
-        docx_filename = secure_filename(docx_file.filename)
+        # 保存Word文档（使用safe_filename保留中文）
+        docx_filename = safe_filename(docx_file.filename)
         docx_path = Path(app.config['UPLOAD_FOLDER']) / docx_filename
         docx_file.save(str(docx_path))
+        logger.info(f"Word文档已保存: {docx_filename}")
         
-        # 保存附件
+        # 保存附件（使用safe_filename保留中文）
         attachment_files = request.files.getlist('attachments')
         attachment_paths = []
         
         for file in attachment_files:
             if file and file.filename and allowed_file(file.filename, ALLOWED_ATTACHMENTS):
-                filename = secure_filename(file.filename)
+                filename = safe_filename(file.filename)
                 filepath = Path(app.config['UPLOAD_FOLDER']) / filename
                 file.save(str(filepath))
                 attachment_paths.append(str(filepath))
+                logger.info(f"附件已保存: {filename}")
         
         return jsonify({
             'success': True,
@@ -144,7 +193,7 @@ def review_document():
         logger.info("开始使用视觉大模型处理附件...")
         vision_processor = VisionProcessor(
             api_key=ai_config.get('api_key'),
-            model="qwen3-vl-plus"
+            model=ai_config.get('vl_model', 'qwen3-vl-plus')
         )
         ocr_results = []
         
@@ -185,9 +234,165 @@ def review_document():
         yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
 
 
+@app.route('/api/review-stream', methods=['POST'])
+def review_document_stream():
+    """执行文档审核（流式版本，支持实时进度）"""
+    data = request.json
+    docx_path = data.get('docx_path')
+    attachment_paths = data.get('attachment_paths', [])
+    review_type = data.get('review_type', 'comprehensive')
+    
+    def generate():
+        try:
+            if not docx_path or not Path(docx_path).exists():
+                yield f"data: {json.dumps({'type': 'error', 'error': 'Word文档不存在'}, ensure_ascii=False)}\n\n"
+                return
+            
+            # 获取AI配置
+            ai_config = config.get_ai_config()
+            total_steps = len(attachment_paths) + 3  # 附件处理 + 解析 + AI审核 + 生成报告
+            current_step = 0
+            
+            # 1. 处理附件
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'init', 'percent': 5, 'message': '初始化处理器...'}, ensure_ascii=False)}\n\n"
+            
+            vision_processor = VisionProcessor(
+                api_key=ai_config.get('api_key'),
+                model=ai_config.get('vl_model', 'qwen3-vl-plus')
+            )
+            pdf_extractor = PDFTextExtractor()
+            ocr_results = []
+            
+            for i, att_path in enumerate(attachment_paths):
+                if not Path(att_path).exists():
+                    continue
+                
+                file_ext = Path(att_path).suffix.lower()
+                file_name = Path(att_path).name
+                current_step += 1
+                percent = int(10 + (current_step / total_steps) * 50)
+                
+                if file_ext == '.pdf':
+                    yield f"data: {json.dumps({'type': 'progress', 'step': 'attachment', 'current': i+1, 'total': len(attachment_paths), 'percent': percent, 'message': f'PDF文本提取: {file_name}'}, ensure_ascii=False)}\n\n"
+                    result = pdf_extractor.extract_from_pdf(att_path)
+                    ocr_results.append(result)
+                else:
+                    yield f"data: {json.dumps({'type': 'progress', 'step': 'attachment', 'current': i+1, 'total': len(attachment_paths), 'percent': percent, 'message': f'视觉识别: {file_name}'}, ensure_ascii=False)}\n\n"
+                    result = vision_processor.process_file(att_path)
+                    ocr_results.append(result)
+        
+            # 2. 解析Word文档
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'parse', 'percent': 65, 'message': '解析Word文档...'}, ensure_ascii=False)}\n\n"
+            parser = DocxParser()
+            doc_result = parser.parse_document(docx_path)
+            
+            # 3. AI审核
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'review', 'percent': 70, 'message': 'AI审核中（可能需要1-2分钟）...'}, ensure_ascii=False)}\n\n"
+            
+            # 判断审核类型
+            if review_type == 'complaint':
+                # 申诉文档专用审核
+                complaint_parser = ComplaintDocumentParser()
+                parsed_doc = complaint_parser.parse_document(doc_result)
+                
+                # 创建审核器（传入AI客户端）
+                from openai import OpenAI
+                ai_client = OpenAI(
+                    api_key=ai_config.get('api_key'),
+                    base_url=ai_config.get('base_url')
+                )
+                complaint_reviewer = ComplaintReviewer(
+                    ai_client=ai_client,
+                    model=ai_config.get('model'),
+                    vl_model=ai_config.get('vl_model', 'qwen3-vl-plus')
+                )
+                
+                # 获取上传的文件名列表
+                uploaded_files = [Path(p).name for p in attachment_paths]
+                
+                yield f"data: {json.dumps({'type': 'progress', 'step': 'review', 'percent': 75, 'message': '执行三维度交叉核验...'}, ensure_ascii=False)}\n\n"
+                
+                # 执行审核
+                review_result = complaint_reviewer.review_complaint_document(
+                    parsed_doc,
+                    ocr_results,
+                    uploaded_files
+                )
+            else:
+                # 通用审核
+                reviewer = AIReviewer(**ai_config)
+                review_result = reviewer.batch_review(
+                    doc_result,
+                    ocr_results,
+                    review_types=[review_type]
+                )
+        
+            # 4. 生成报告
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'report', 'percent': 90, 'message': '生成报告...'}, ensure_ascii=False)}\n\n"
+            output_path = Path(app.config['OUTPUT_FOLDER']) / 'review_report'
+            
+            # 保存JSON报告
+            json_path = str(output_path) + '.json'
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(review_result, f, ensure_ascii=False, indent=2)
+            
+            # 保存Markdown报告
+            md_path = str(output_path) + '.md'
+            if review_type == 'complaint':
+                # 申诉文档报告 - 三维度全核验
+                with open(md_path, 'w', encoding='utf-8') as f:
+                    # 写入三维度核验报告（主报告）
+                    if 'three_dimension_report' in review_result and review_result['three_dimension_report']:
+                        f.write(review_result['three_dimension_report'])
+                        f.write("\n\n---\n\n")
+                    else:
+                        # 兼容旧格式
+                        f.write("# 申诉文档审核报告\n\n")
+                        f.write(f"**文档**: {review_result.get('document', 'Unknown')}\n\n")
+                        f.write(f"**总问题数**: {review_result['summary']['total_issues']}\n")
+                        f.write(f"**严重问题**: {review_result['summary']['critical_issues']}\n")
+                        f.write(f"**警告**: {review_result['summary']['warnings']}\n\n")
+                        f.write("---\n\n")
+                    
+                    # 附件名称对比表
+                    if 'attachment_name_comparison' in review_result:
+                        f.write(review_result['attachment_name_comparison'])
+                        f.write("\n\n---\n\n")
+                    
+                    # 附件核查表
+                    if 'attachment_checklist_markdown' in review_result:
+                        f.write(review_result['attachment_checklist_markdown'])
+            else:
+                # 通用报告
+                pass  # 通用报告在AIReviewer中生成
+            
+            yield f"data: {json.dumps({'type': 'progress', 'step': 'done', 'percent': 100, 'message': '审核完成！'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'complete', 'success': True, 'result': review_result, 'report_json': json_path, 'report_md': md_path}, ensure_ascii=False)}\n\n"
+            
+            # 清理上传的临时文件
+            try:
+                if docx_path and Path(docx_path).exists():
+                    Path(docx_path).unlink()
+                    logger.info(f"已清理临时文件: {docx_path}")
+                for att_path in attachment_paths:
+                    if att_path and Path(att_path).exists():
+                        Path(att_path).unlink()
+                        logger.info(f"已清理临时文件: {att_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"清理临时文件失败: {cleanup_error}")
+        
+        except Exception as e:
+            logger.error(f"审核失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+
 @app.route('/api/review-sync', methods=['POST'])
 def review_document_sync():
-    """执行文档审核（同步版本）"""
+    """执行文档审核（同步版本，保留兼容）"""
     try:
         data = request.json
         docx_path = data.get('docx_path')
@@ -204,7 +409,7 @@ def review_document_sync():
         logger.info("开始处理附件...")
         vision_processor = VisionProcessor(
             api_key=ai_config.get('api_key'),
-            model="qwen3-vl-plus"
+            model=ai_config.get('vl_model', 'qwen3-vl-plus')
         )
         pdf_extractor = PDFTextExtractor()
         ocr_results = []
@@ -249,7 +454,8 @@ def review_document_sync():
             )
             complaint_reviewer = ComplaintReviewer(
                 ai_client=ai_client,
-                model=ai_config.get('model')
+                model=ai_config.get('model'),
+                vl_model=ai_config.get('vl_model', 'qwen3-vl-plus')
             )
             
             # 获取上传的文件名列表

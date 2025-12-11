@@ -94,75 +94,120 @@
             font-size: 0.9rem;
             padding: 8px 15px;
         }
-        /* 三维度报告样式 */
+        /* 三维度报告样式 - 优化版 */
         .report-container {
             background: #fff;
-            border-radius: 10px;
-            padding: 20px;
+            border-radius: 12px;
+            padding: 25px 30px;
             max-height: 800px;
             overflow-y: auto;
+            line-height: 1.7;
+            font-size: 15px;
         }
         .report-container h1 {
             color: #667eea;
-            border-bottom: 2px solid #667eea;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 12px;
+            margin-bottom: 25px;
+            font-size: 1.6rem;
+            font-weight: 600;
         }
         .report-container h2 {
             color: #764ba2;
-            margin-top: 25px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #e9ecef;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e9ecef;
+            font-size: 1.3rem;
+            font-weight: 600;
         }
         .report-container h3 {
             color: #495057;
-            margin-top: 20px;
+            margin-top: 22px;
+            margin-bottom: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
         }
         .report-container table {
             width: 100%;
-            border-collapse: collapse;
-            margin: 15px 0;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 18px 0;
             font-size: 0.9rem;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
         }
         .report-container th, .report-container td {
-            border: 1px solid #dee2e6;
-            padding: 10px;
+            border: 1px solid #e0e0e0;
+            padding: 12px 15px;
             text-align: left;
+            vertical-align: middle;
         }
         .report-container th {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
-        .report-container tr:nth-child(even) {
-            background-color: #f8f9fa;
+        .report-container tbody tr:nth-child(even) {
+            background-color: #f8f9fc;
         }
-        .report-container tr:hover {
-            background-color: #e9ecef;
+        .report-container tbody tr:hover {
+            background-color: #eef1f7;
         }
         .report-container code {
             background: #f1f3f4;
-            padding: 2px 6px;
+            padding: 3px 8px;
             border-radius: 4px;
             color: #d63384;
+            font-size: 0.9em;
         }
         .report-container pre {
             background: #f8f9fa;
-            padding: 15px;
+            padding: 18px;
             border-radius: 8px;
             overflow-x: auto;
+            border-left: 4px solid #667eea;
         }
         .report-container ul, .report-container ol {
-            padding-left: 20px;
+            padding-left: 25px;
+            margin: 12px 0;
         }
         .report-container li {
-            margin-bottom: 5px;
+            margin-bottom: 8px;
+            line-height: 1.6;
         }
         .report-container strong {
-            color: #495057;
+            color: #333;
+            font-weight: 600;
         }
         .report-container hr {
-            margin: 30px 0;
-            border-color: #dee2e6;
+            margin: 35px 0;
+            border: none;
+            border-top: 2px dashed #dee2e6;
+        }
+        .report-container blockquote {
+            background: linear-gradient(135deg, #f8f9ff 0%, #f0f4ff 100%);
+            border-left: 4px solid #667eea;
+            padding: 15px 20px;
+            margin: 18px 0;
+            border-radius: 0 8px 8px 0;
+            font-style: normal;
+        }
+        .report-container blockquote strong {
+            color: #667eea;
+        }
+        /* 状态图标样式 */
+        .report-container td:first-child {
+            font-weight: 500;
+        }
+        /* 居中对齐的列 */
+        .report-container td:last-child,
+        .report-container th:last-child {
+            text-align: center;
         }
         /* 标签页样式 */
         .nav-tabs .nav-link {
@@ -511,12 +556,15 @@
         // 开始审核
         document.getElementById('startReviewBtn').addEventListener('click', async function() {
             try {
+                // 禁用按钮防止重复点击
+                this.disabled = true;
+                
                 // 1. 上传文件
                 const formData = new FormData();
                 formData.append('docx', uploadedDocx);
                 uploadedAttachments.forEach(file => formData.append('attachments', file));
 
-                showProgress('上传文件中...', 10);
+                showProgress('上传文件中...', 5);
 
                 const uploadResponse = await fetch('/api/upload', {
                     method: 'POST',
@@ -528,10 +576,10 @@
                     throw new Error(uploadData.error);
                 }
 
-                // 2. 开始审核
-                showProgress('开始审核...', 30);
+                // 2. 使用流式API开始审核
+                showProgress('开始审核...', 10);
 
-                const reviewResponse = await fetch('/api/review-sync', {
+                const response = await fetch('/api/review-stream', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -541,22 +589,56 @@
                     })
                 });
 
-                showProgress('处理中...', 70);
+                // 处理SSE流式响应
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
 
-                const reviewData = await reviewResponse.json();
-
-                if (!reviewData.success) {
-                    throw new Error(reviewData.error);
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    
+                    buffer += decoder.decode(value, {stream: true});
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // 保留不完整的行
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                
+                                if (data.type === 'progress') {
+                                    // 更新进度条
+                                    showProgress(data.message, data.percent);
+                                    if (data.current && data.total) {
+                                        document.getElementById('progressDetails').textContent = 
+                                            `处理附件 ${data.current}/${data.total}`;
+                                    }
+                                } else if (data.type === 'complete') {
+                                    // 审核完成
+                                    showProgress('完成！', 100);
+                                    setTimeout(() => {
+                                        showResult(data.result);
+                                    }, 500);
+                                } else if (data.type === 'error') {
+                                    throw new Error(data.error);
+                                }
+                            } catch (e) {
+                                if (e.message !== data?.error) {
+                                    console.warn('解析SSE数据失败:', line, e);
+                                }
+                            }
+                        }
+                    }
                 }
-
-                showProgress('完成！', 100);
-                setTimeout(() => {
-                    showResult(reviewData.result);
-                }, 500);
 
             } catch (error) {
                 alert('审核失败: ' + error.message);
                 hideProgress();
+            } finally {
+                // 重新启用按钮
+                document.getElementById('startReviewBtn').disabled = false;
+                checkCanStart();
             }
         });
 

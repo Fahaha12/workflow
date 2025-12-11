@@ -104,8 +104,18 @@ class AttachmentAnalyzer:
         # 查找文档中对该附件的引用
         references = self._find_attachment_references(index, filename, section2, section3)
         
-        # 核对关键数据
-        data_check = self._check_data_consistency(att_info, doc_reference)
+        # 核对关键数据（操作指引类附件跳过一致性检查）
+        if att_info.get('is_operation_guide', False):
+            data_check = {
+                'is_consistent': True,
+                'issues': [],
+                'critical_issues': 0,
+                'warnings': 0,
+                'skipped': True,
+                'skip_reason': '操作指引类附件，无需核验业务数据'
+            }
+        else:
+            data_check = self._check_data_consistency(att_info, doc_reference)
         
         # 生成核查表
         checklist = {
@@ -125,6 +135,9 @@ class AttachmentAnalyzer:
             
             # 附件关键内容
             'key_content': {
+                'content_type': att_info.get('content_type', '未分类'),
+                'content_summary': att_info.get('content_summary', ''),
+                'is_operation_guide': att_info.get('is_operation_guide', False),
                 'phone_numbers': {
                     'found': att_info['phone_numbers'],
                     'count': len(att_info['phone_numbers']),
@@ -169,15 +182,81 @@ class AttachmentAnalyzer:
         
         return checklist
     
-    def _extract_attachment_info(self, content: str) -> Dict[str, List[str]]:
+    def _extract_attachment_info(self, content: str) -> Dict[str, Any]:
         """从附件内容中提取关键信息"""
+        # 判断是否为操作指引类（与业务数据无关）
+        is_guide = self._is_operation_guide(content)
+        
+        # 提取视觉模型识别的内容类型
+        content_type = self._extract_content_type(content)
+        if content_type == '未分类':
+            content_type = '操作指引' if is_guide else '业务数据'
+        
+        # 提取内容摘要
+        content_summary = self._extract_content_summary(content)
+        
         return {
-            'phone_numbers': list(set(re.findall(r'1[3-9]\d{9}', content))),
+            'phone_numbers': list(set(re.findall(r'(?<!\d)1[3-9]\d{9}(?!\d)', content))),
             'business_numbers': list(set(re.findall(r'\b\d{10,15}\b', content))),
             'amounts': list(set(re.findall(r'¥?\s*\d+\.?\d*\s*元', content))),
             'dates': list(set(re.findall(r'\d{4}[-年]\d{1,2}[-月]\d{1,2}[日]?', content))),
             'times': list(set(re.findall(r'\d{1,2}:\d{2}(?::\d{2})?', content))),
+            'is_operation_guide': is_guide or content_type == '操作指引',
+            'content_type': content_type,
+            'content_summary': content_summary
         }
+    
+    def _is_operation_guide(self, content: str) -> bool:
+        """判断附件是否为操作指引类（与具体业务数据无关）"""
+        # 检查视觉模型是否已标注
+        if '【操作指引类' in content or '操作指引类-与具体业务数据无关' in content:
+            return True
+        if '【操作指引】' in content:
+            return True
+        
+        # 根据文件名和内容关键词判断
+        guide_keywords = [
+            '销户入口', '操作入口', '知识库', '操作指引', '操作说明',
+            '如何办理', '办理流程', '办理方式', '办理入口',
+            '手厅', 'APP截图', '界面截图'
+        ]
+        
+        content_lower = content.lower()
+        for keyword in guide_keywords:
+            if keyword in content_lower:
+                return True
+        
+        return False
+    
+    def _extract_content_type(self, content: str) -> str:
+        """从视觉模型输出中提取内容类型"""
+        type_mapping = {
+            '【业务凭证】': '业务凭证',
+            '【账单明细】': '账单明细',
+            '【记录查询】': '记录查询',
+            '【沟通记录】': '沟通记录',
+            '【操作指引】': '操作指引',
+            '【操作指引类': '操作指引',
+            '【其他】': '其他'
+        }
+        
+        for marker, type_name in type_mapping.items():
+            if marker in content:
+                return type_name
+        
+        return '未分类'
+    
+    def _extract_content_summary(self, content: str) -> str:
+        """从视觉模型输出中提取内容摘要"""
+        # 查找 **内容摘要**：后面的内容
+        import re
+        match = re.search(r'\*\*内容摘要\*\*[：:]\s*(.+?)(?:\n|$)', content)
+        if match:
+            return match.group(1).strip()
+        
+        # 备用：取前100个字符
+        clean_content = content.replace('【', '').replace('】', '')
+        return clean_content[:100] + '...' if len(clean_content) > 100 else clean_content
     
     def _find_attachment_references(self,
                                    index: int,
@@ -191,41 +270,29 @@ class AttachmentAnalyzer:
             'section3': []
         }
         
-        # 精确匹配附件编号的模式
-        # 匹配 "附件1" 但不匹配 "附件10"、"附件11" 等
         index_str = str(index)
         
-        def is_exact_match(ref_number: str, ref_text: str) -> bool:
+        def is_exact_match(ref_number: str) -> bool:
             """精确匹配附件编号"""
-            # 方法1：直接比较编号
-            if ref_number == index_str:
-                return True
-            
-            # 方法2：使用正则精确匹配 "附件X" 格式
-            # 确保X后面不是数字（避免附件1匹配到附件10）
-            pattern = rf'附件{index_str}(?!\d)'
-            if re.search(pattern, ref_text):
-                return True
-            
-            return False
+            return ref_number == index_str
         
         # 在第二部分查找引用
         for ref in section2.get('attachment_refs', []):
             ref_number = ref.get('number', '')
-            ref_text = ref.get('reference', '')
-            if is_exact_match(ref_number, ref_text):
+            if is_exact_match(ref_number):
                 refs['section2'].append({
-                    'reference': ref_text,
-                    'context': ref.get('context', '')[:100]  # 限制长度
+                    'reference': ref.get('reference', ''),
+                    'description': ref.get('description', ''),
+                    'context': ref.get('context', '')[:100]
                 })
         
         # 在第三部分查找引用
         for ref in section3.get('attachment_refs', []):
             ref_number = ref.get('number', '')
-            ref_text = ref.get('reference', '')
-            if is_exact_match(ref_number, ref_text):
+            if is_exact_match(ref_number):
                 refs['section3'].append({
-                    'reference': ref_text,
+                    'reference': ref.get('reference', ''),
+                    'description': ref.get('description', ''),
                     'context': ref.get('context', '')[:100]
                 })
         
@@ -263,41 +330,34 @@ class AttachmentAnalyzer:
             }
     
     def _check_data_consistency(self,
-                                att_info: Dict[str, List[str]],
+                                att_info: Dict[str, Any],
                                 doc_reference: Dict[str, Any]) -> Dict[str, Any]:
-        """核查数据一致性"""
+        """核查数据一致性 - 简化版，与三维度核验报告保持一致"""
+        
+        # 简化的一致性检查：只检查是否有明显冲突
+        # 不再对每个数据项进行严格匹配，因为三维度核验报告会由AI智能判断
         
         issues = []
         
-        # 检查手机号码
-        for phone in att_info['phone_numbers']:
-            if phone not in doc_reference['phone_numbers']:
+        # 只检查关键的业务号码是否一致（如果文档和附件都有号码）
+        doc_phones = doc_reference.get('phone_numbers', [])
+        att_phones = att_info.get('phone_numbers', [])
+        
+        # 如果文档中有明确的业务号码，检查附件中是否包含
+        if doc_phones and att_phones:
+            # 检查是否有任何匹配
+            has_match = any(p in doc_phones for p in att_phones)
+            if not has_match and len(att_phones) == 1 and len(doc_phones) == 1:
+                # 只有在双方都只有一个号码且不匹配时才报告问题
                 issues.append({
-                    'type': 'phone_not_in_doc',
+                    'type': 'phone_mismatch',
                     'severity': 'warning',
-                    'data': phone,
-                    'message': f'附件中的号码 {phone} 在文档中未提及'
+                    'data': att_phones[0],
+                    'message': f'附件号码 {att_phones[0]} 与文档号码 {doc_phones[0]} 不一致'
                 })
         
-        # 检查金额
-        for amount in att_info['amounts']:
-            if amount not in doc_reference['amounts']:
-                issues.append({
-                    'type': 'amount_not_in_doc',
-                    'severity': 'critical',
-                    'data': amount,
-                    'message': f'附件中的金额 {amount} 与文档中的金额不一致'
-                })
-        
-        # 检查日期
-        for date in att_info['dates']:
-            if date not in doc_reference['dates']:
-                issues.append({
-                    'type': 'date_not_in_doc',
-                    'severity': 'warning',
-                    'data': date,
-                    'message': f'附件中的日期 {date} 在文档中未提及'
-                })
+        # 金额检查也简化：只有明显冲突才报告
+        # 不再逐个检查，因为附件中可能有很多金额信息
         
         return {
             'total_issues': len(issues),
@@ -325,7 +385,7 @@ class AttachmentAnalyzer:
         return '质量良好'
     
     def _generate_conclusion(self,
-                           att_info: Dict[str, List[str]],
+                           att_info: Dict[str, Any],
                            doc_reference: Dict[str, Any],
                            references: Dict[str, List],
                            data_check: Dict[str, Any]) -> Dict[str, Any]:
@@ -337,144 +397,170 @@ class AttachmentAnalyzer:
         # 判断数据是否一致
         is_consistent = data_check['is_consistent']
         
+        # 判断是否为操作指引类
+        is_operation_guide = att_info.get('is_operation_guide', False)
+        
         # 判断是否有内容
         has_key_content = any([
-            att_info['phone_numbers'],
-            att_info['business_numbers'],
-            att_info['amounts'],
-            att_info['dates']
+            att_info.get('phone_numbers', []),
+            att_info.get('business_numbers', []),
+            att_info.get('amounts', []),
+            att_info.get('dates', [])
         ])
         
-        # 生成结论
-        if is_referenced and is_consistent and has_key_content:
+        # 生成结论 - 与三维度核验报告保持一致
+        # 主要关注数据一致性，引用情况仅作为参考信息
+        if is_operation_guide:
             status = 'pass'
-            message = '✅ 附件内容完整，数据一致，引用正确'
-        elif not is_referenced:
-            status = 'warning'
-            message = '⚠️ 附件未在文档中被引用'
+            message = '✅ 操作指引，无需核验'
         elif not is_consistent:
             status = 'fail'
-            message = f'❌ 发现 {data_check["critical_issues"]} 个严重数据不一致问题'
-        elif not has_key_content:
-            status = 'warning'
-            message = '⚠️ 附件中未提取到关键数据'
-        else:
+            message = f'❌ 发现 {data_check["critical_issues"]} 个数据不一致'
+        elif data_check.get('warnings', 0) > 0:
             status = 'warning'
             message = f'⚠️ 存在 {data_check["warnings"]} 个警告'
+        elif has_key_content:
+            status = 'pass'
+            message = '✅ 数据一致'
+        else:
+            # 无关键数据的附件也标记为通过
+            status = 'pass'
+            message = '✅ 通过'
         
         return {
             'status': status,
             'message': message,
             'is_referenced': is_referenced,
             'is_consistent': is_consistent,
-            'has_key_content': has_key_content
+            'has_key_content': has_key_content,
+            'is_operation_guide': is_operation_guide
         }
     
     def format_checklist_as_table(self, checklist: Dict[str, Any]) -> str:
-        """将核查表格式化为Markdown表格"""
+        """将核查表格式化为Markdown表格（与三维度报告附件部分格式一致）"""
         
         lines = []
-        lines.append("# 附件关键内容核查表\n")
-        lines.append(f"**总附件数**: {checklist['total_attachments']}\n")
+        lines.append("# 📎 附件核查表（详细版）\n")
+        lines.append("> 本表是三维度核验报告中「附件逐项核验」的详细补充\n")
+        
+        # 统计信息
+        total = checklist['total_attachments']
+        pass_count = sum(1 for att in checklist['attachments'] if att['conclusion']['status'] == 'pass')
+        warn_count = sum(1 for att in checklist['attachments'] if att['conclusion']['status'] == 'warning')
+        fail_count = sum(1 for att in checklist['attachments'] if att['conclusion']['status'] == 'fail')
+        
+        lines.append(f"**附件总数**: {total} | ✅ 通过: {pass_count} | ⚠️ 警告: {warn_count} | ❌ 问题: {fail_count}\n")
         lines.append("---\n")
         
+        # 附件逐项核验表（与三维度报告格式一致）
+        lines.append("## 📊 附件逐项核验\n")
+        lines.append("| 附件 | 文件名 | 类型 | 关键信息 | 核验说明 |")
+        lines.append("|:----:|--------|:----:|---------|---------|")
+        
         for att in checklist['attachments']:
-            lines.append(f"\n## 附件 {att['index']}: {att['filename']}\n")
+            idx = att['index']
+            filename = att['filename'][:30] + '...' if len(att['filename']) > 30 else att['filename']
             
-            # 基本信息表
-            lines.append("### 基本信息\n")
-            lines.append("| 项目 | 内容 |")
-            lines.append("|------|------|")
-            lines.append(f"| 文件名 | {att['filename']} |")
-            lines.append(f"| 文件类型 | {att['file_type']} |")
-            lines.append(f"| 文件大小 | {att['file_size']} |")
-            lines.append(f"| 识别方式 | {att['ocr_method']} |")
-            lines.append(f"| 内容质量 | {att['content_summary']['quality']} |")
-            lines.append("")
+            # 内容类型
+            key_content = att.get('key_content', {})
+            is_guide = key_content.get('is_operation_guide', False)
+            content_type = key_content.get('content_type', '未分类')
             
-            # 文档引用情况
-            lines.append("### 文档引用情况\n")
-            lines.append("| 项目 | 内容 |")
-            lines.append("|------|------|")
-            lines.append(f"| 是否被引用 | {'✅ 是' if att['document_references']['is_referenced'] else '❌ 否'} |")
-            lines.append(f"| 引用次数 | {att['document_references']['total_refs']} |")
+            # 关键信息摘要 - 不截断，完整显示
+            content_summary = key_content.get('content_summary', '')
+            if not content_summary:
+                # 从提取的数据生成摘要
+                info_parts = []
+                if key_content.get('phone_numbers', {}).get('found'):
+                    phones = key_content['phone_numbers']['found']
+                    info_parts.append(f"号码: {', '.join(phones[:2])}")
+                if key_content.get('amounts', {}).get('found'):
+                    amounts = key_content['amounts']['found']
+                    info_parts.append(f"金额: {', '.join(amounts[:3])}")
+                if key_content.get('dates', {}).get('found'):
+                    dates = key_content['dates']['found']
+                    info_parts.append(f"日期: {', '.join(dates[:2])}")
+                content_summary = '; '.join(info_parts) if info_parts else '-'
             
-            # 去重后显示引用
-            if att['document_references']['section2_refs']:
-                unique_refs = list(set([r['reference'] for r in att['document_references']['section2_refs']]))
-                lines.append(f"| 第二部分引用 | {', '.join(unique_refs)} |")
+            # 核验说明 - 不截断
+            conclusion = att['conclusion']
+            if is_guide:
+                result = '✅ 操作指引，无需核验'
+            elif conclusion['status'] == 'pass':
+                result = '✅ 数据一致'
+            elif conclusion['status'] == 'fail':
+                result = '❌ ' + conclusion['message'].split('❌')[-1].strip()
+            else:
+                result = '⚠️ ' + conclusion['message'].split('⚠️')[-1].strip()
             
-            if att['document_references']['section3_refs']:
-                unique_refs = list(set([r['reference'] for r in att['document_references']['section3_refs']]))
-                lines.append(f"| 第三部分引用 | {', '.join(unique_refs)} |")
+            lines.append(f"| 附件{idx} | {filename} | {content_type} | {content_summary} | {result} |")
+        
+        lines.append("")
+        
+        # 附件类型说明（与三维度报告一致）
+        lines.append("**附件类型处理规则**：")
+        lines.append("- **业务凭证**：需核验金额、日期、号码等与文本一致性")
+        lines.append("- **记录查询**：需核验查询结果与文本描述一致性")
+        lines.append("- **操作指引**：直接标记为 ✅ 通过，其中的金额等信息与本次申诉无关")
+        lines.append("- **沟通记录**：需核验沟通内容与文本描述一致性\n")
+        
+        # 只显示有问题的附件详情（排除操作指引类附件）
+        problem_attachments = [att for att in checklist['attachments'] 
+                              if (att['conclusion']['status'] != 'pass' or att['consistency_check'].get('issues', []))
+                              and not att.get('key_content', {}).get('is_operation_guide', False)]
+        
+        if problem_attachments:
+            lines.append("---\n")
+            lines.append("## ⚠️ 需关注的附件详情\n")
             
-            lines.append("")
-            
-            # 关键内容核查表
-            lines.append("### 关键内容核查\n")
-            lines.append("| 数据类型 | 提取数量 | 匹配状态 | 具体内容 |")
-            lines.append("|---------|---------|---------|---------|")
-            
-            # 手机号码
-            phone_data = att['key_content']['phone_numbers']
-            phone_status = phone_data['match_status']['status']
-            phone_icon = self._get_status_icon(phone_status)
-            phone_content = ', '.join(phone_data['found'][:3]) if phone_data['found'] else '-'
-            lines.append(f"| 手机号码 | {phone_data['count']} | {phone_icon} {phone_data['match_status']['message']} | {phone_content} |")
-            
-            # 业务号码
-            business_data = att['key_content']['business_numbers']
-            business_status = business_data['match_status']['status']
-            business_icon = self._get_status_icon(business_status)
-            business_content = ', '.join(business_data['found'][:3]) if business_data['found'] else '-'
-            lines.append(f"| 业务号码 | {business_data['count']} | {business_icon} {business_data['match_status']['message']} | {business_content} |")
-            
-            # 金额
-            amount_data = att['key_content']['amounts']
-            amount_status = amount_data['match_status']['status']
-            amount_icon = self._get_status_icon(amount_status)
-            amount_content = ', '.join(amount_data['found'][:3]) if amount_data['found'] else '-'
-            lines.append(f"| 金额 | {amount_data['count']} | {amount_icon} {amount_data['match_status']['message']} | {amount_content} |")
-            
-            # 日期
-            date_data = att['key_content']['dates']
-            date_status = date_data['match_status']['status']
-            date_icon = self._get_status_icon(date_status)
-            date_content = ', '.join(date_data['found'][:3]) if date_data['found'] else '-'
-            lines.append(f"| 日期 | {date_data['count']} | {date_icon} {date_data['match_status']['message']} | {date_content} |")
-            
-            # 时间
-            time_data = att['key_content']['times']
-            time_status = time_data['match_status']['status']
-            time_icon = self._get_status_icon(time_status)
-            time_content = ', '.join(time_data['found'][:3]) if time_data['found'] else '-'
-            lines.append(f"| 时间 | {time_data['count']} | {time_icon} {time_data['match_status']['message']} | {time_content} |")
-            
-            lines.append("")
-            
-            # 数据一致性问题
-            if att['consistency_check']['issues']:
-                lines.append("### ⚠️ 数据一致性问题\n")
-                lines.append("| 严重程度 | 类型 | 数据 | 说明 |")
-                lines.append("|---------|------|------|------|")
+            for att in problem_attachments:
+                lines.append(f"### 附件{att['index']}: {att['filename']}\n")
                 
-                for issue in att['consistency_check']['issues']:
-                    severity_icon = '🔴' if issue['severity'] == 'critical' else '🟡'
-                    lines.append(f"| {severity_icon} {issue['severity']} | {issue['type']} | {issue['data']} | {issue['message']} |")
+                # 内容类型和摘要
+                key_content = att.get('key_content', {})
+                content_type = key_content.get('content_type', '未分类')
+                content_summary = key_content.get('content_summary', '')
+                if content_summary:
+                    lines.append(f"**类型**: {content_type} | **内容**: {content_summary[:50]}\n")
+                
+                # 提取的关键数据表
+                lines.append("| 数据类型 | 附件中的数据 | 与文档对比 |")
+                lines.append("|:--------:|-------------|:----------:|")
+                
+                # 手机号码
+                phone = key_content.get('phone_numbers', {})
+                if phone.get('found'):
+                    phone_icon = self._get_status_icon(phone['match_status']['status'])
+                    lines.append(f"| 手机号 | {', '.join(phone['found'][:3])} | {phone_icon} |")
+                
+                # 金额
+                amount = key_content.get('amounts', {})
+                if amount.get('found'):
+                    amount_icon = self._get_status_icon(amount['match_status']['status'])
+                    lines.append(f"| 金额 | {', '.join(amount['found'][:3])} | {amount_icon} |")
+                
+                # 日期
+                date = key_content.get('dates', {})
+                if date.get('found'):
+                    date_icon = self._get_status_icon(date['match_status']['status'])
+                    lines.append(f"| 日期 | {', '.join(date['found'][:3])} | {date_icon} |")
                 
                 lines.append("")
-            
-            # 核查结论
-            lines.append("### 核查结论\n")
-            conclusion = att['conclusion']
-            lines.append(f"**{conclusion['message']}**\n")
-            lines.append("| 检查项 | 结果 |")
-            lines.append("|--------|------|")
-            lines.append(f"| 文档引用 | {'✅ 已引用' if conclusion['is_referenced'] else '❌ 未引用'} |")
-            lines.append(f"| 数据一致性 | {'✅ 一致' if conclusion['is_consistent'] else '❌ 不一致'} |")
-            lines.append(f"| 关键内容 | {'✅ 有' if conclusion['has_key_content'] else '❌ 无'} |")
-            
-            lines.append("\n---\n")
+                
+                # 问题列表
+                if att['consistency_check'].get('issues'):
+                    lines.append("**发现的问题**：")
+                    for issue in att['consistency_check']['issues'][:3]:
+                        severity_icon = '❌' if issue['severity'] == 'critical' else '⚠️'
+                        lines.append(f"- {severity_icon} {issue['message']}")
+                    lines.append("")
+                
+                # 结论
+                lines.append(f"**核验结论**: {att['conclusion']['message']}\n")
+        else:
+            lines.append("---\n")
+            lines.append("## ✅ 所有附件核验通过\n")
+            lines.append("> 未发现数据不一致或其他问题\n")
         
         return '\n'.join(lines)
     

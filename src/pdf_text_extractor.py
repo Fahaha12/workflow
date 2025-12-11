@@ -172,8 +172,8 @@ class PDFTextExtractor:
             'business_info': [],
         }
         
-        # 提取手机号
-        phone_pattern = r'1[3-9]\d{9}'
+        # 提取手机号（确保是独立的11位数字，不是从长数字串中截取）
+        phone_pattern = r'(?<!\d)1[3-9]\d{9}(?!\d)'
         key_info['phone_numbers'] = list(set(re.findall(phone_pattern, text)))
         
         # 提取金额

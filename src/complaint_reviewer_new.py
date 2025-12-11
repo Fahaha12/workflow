@@ -15,22 +15,24 @@ logger = logging.getLogger(__name__)
 class ComplaintReviewer:
     """申诉文档审核器"""
     
-    def __init__(self, ai_client=None, model=None):
+    def __init__(self, ai_client=None, model=None, vl_model=None):
         """
         初始化审核器
         
         Args:
             ai_client: AI客户端
             model: AI模型名称
+            vl_model: 视觉模型名称
         """
         self.ai_client = ai_client
         self.model = model
+        self.vl_model = vl_model or 'qwen3-vl-plus'
         self.attachment_analyzer = AttachmentAnalyzer()
         
         # 初始化三维度核验器
         if ai_client:
             self.validator = ThreeDimensionValidator(ai_client, model)
-            self.image_extractor = ImageInfoExtractor(ai_client)
+            self.image_extractor = ImageInfoExtractor(ai_client, self.vl_model)
             self.pdf_extractor = PDFInfoExtractor()
         else:
             self.validator = None
@@ -160,15 +162,23 @@ class ComplaintReviewer:
         
         parts = []
         
-        # 标题
-        title = parsed_doc.get('title', sections.get('title', {}).get('content', ''))
+        # 标题 - 优先从parsed_doc顶层获取
+        title = parsed_doc.get('title', '')
+        if not title:
+            title = sections.get('title', {}).get('content', '') if isinstance(sections.get('title'), dict) else ''
         if title:
             parts.append(f"### 标题\n{title}")
+        else:
+            parts.append("### 标题\n无明确标题（用户申诉原文开头即为正文）")
         
-        # 编号
-        doc_number = parsed_doc.get('document_number', sections.get('document_number', {}).get('content', ''))
+        # 编号 - 优先从parsed_doc顶层获取
+        doc_number = parsed_doc.get('document_number', '')
+        if not doc_number:
+            doc_number = sections.get('document_number', {}).get('content', '') if isinstance(sections.get('document_number'), dict) else ''
         if doc_number:
             parts.append(f"### 编号\n{doc_number}")
+        else:
+            parts.append("### 编号\n无明确编号")
         
         # 第一段：用户申诉原文
         section1 = sections.get('section1_original_complaint', {})
@@ -219,7 +229,7 @@ class ComplaintReviewer:
                 continue
             
             # 提取关键信息
-            phone_numbers = list(set(re.findall(r'1[3-9]\d{9}', content)))
+            phone_numbers = list(set(re.findall(r'(?<!\d)1[3-9]\d{9}(?!\d)', content)))
             amounts = list(set(re.findall(r'\d+\.?\d*元', content)))
             dates = list(set(re.findall(r'\d{4}[-年]\d{1,2}[-月]\d{1,2}[日号]?', content)))
             
@@ -273,7 +283,7 @@ class ComplaintReviewer:
             content = result.get('content', '')
             
             # 提取关键信息
-            phone_numbers = list(set(re.findall(r'1[3-9]\d{9}', content)))
+            phone_numbers = list(set(re.findall(r'(?<!\d)1[3-9]\d{9}(?!\d)', content)))
             amounts = list(set(re.findall(r'\d+\.?\d*元', content)))
             
             # 判断状态
@@ -367,7 +377,7 @@ class ComplaintReviewer:
                 'status': '已提取' if content else '无内容',
                 'extracted_info': {
                     'business_numbers': list(set(re.findall(r'\b\d{10,15}\b', content))),
-                    'contact_numbers': list(set(re.findall(r'1[3-9]\d{9}', content))),
+                    'contact_numbers': list(set(re.findall(r'(?<!\d)1[3-9]\d{9}(?!\d)', content))),
                     'amounts': list(set(re.findall(r'¥?\s*\d+\.?\d*\s*元', content))),
                     'dates': list(set(re.findall(r'\d{4}[-年]\d{1,2}[-月]\d{1,2}[日]?', content))),
                     'times': list(set(re.findall(r'\d{1,2}:\d{2}(?::\d{2})?', content))),

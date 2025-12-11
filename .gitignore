@@ -16,6 +16,9 @@ output/
 *.json
 *.log
 
+# 上传的文件
+uploads/
+
 # IDE
 .vscode/
 .idea/
