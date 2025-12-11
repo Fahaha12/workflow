@@ -190,7 +190,7 @@ def review_document():
         ai_config = config.get_ai_config()
         
         # 1. 使用视觉大模型处理附件（跳过OCR）
-        logger.info("开始使用视觉大模型处理附件...")
+        logger.info(f"[1/3] 视觉识别 {len(attachment_paths)} 个附件...")
         vision_processor = VisionProcessor(
             api_key=ai_config.get('api_key'),
             model=ai_config.get('vl_model', 'qwen3-vl-plus')
@@ -204,14 +204,14 @@ def review_document():
                 yield f"data: {json.dumps({'type': 'progress', 'step': 'vision', 'current': i+1, 'total': len(attachment_paths), 'message': f'视觉识别: {Path(att_path).name}'}, ensure_ascii=False)}\n\n"
         
         # 2. 解析Word文档
-        logger.info("开始解析Word文档...")
+        logger.debug("解析Word文档...")
         yield f"data: {json.dumps({'type': 'progress', 'step': 'parse', 'message': '解析Word文档'}, ensure_ascii=False)}\n\n"
         
         parser = DocxParser()
         doc_result = parser.parse_document(docx_path)
         
         # 3. AI审核
-        logger.info("开始AI审核...")
+        logger.debug("AI审核...")
         yield f"data: {json.dumps({'type': 'progress', 'step': 'review', 'message': 'AI审核中...'}, ensure_ascii=False)}\n\n"
         reviewer = AIReviewer(**ai_config)
         
@@ -222,7 +222,6 @@ def review_document():
         )
         
         # 4. 生成报告
-        logger.info("生成报告...")
         output_path = Path(app.config['OUTPUT_FOLDER']) / 'review_report'
         reviewer.generate_report(review_result, str(output_path))
         
@@ -406,7 +405,7 @@ def review_document_sync():
         ai_config = config.get_ai_config()
         
         # 1. 处理附件（PDF用文本提取，图片用视觉识别）
-        logger.info("开始处理附件...")
+        logger.info(f"[1/3] 处理 {len(attachment_paths)} 个附件...")
         vision_processor = VisionProcessor(
             api_key=ai_config.get('api_key'),
             model=ai_config.get('vl_model', 'qwen3-vl-plus')
@@ -422,27 +421,27 @@ def review_document_sync():
             
             if file_ext == '.pdf':
                 # PDF直接提取文本
-                logger.info(f"PDF文本提取: {Path(att_path).name}")
+                logger.debug(f"PDF提取: {Path(att_path).name}")
                 result = pdf_extractor.extract_from_pdf(att_path)
                 ocr_results.append(result)
             else:
                 # 图片使用视觉识别
-                logger.info(f"视觉识别: {Path(att_path).name}")
+                logger.debug(f"视觉识别: {Path(att_path).name}")
                 result = vision_processor.process_file(att_path)
                 ocr_results.append(result)
         
         # 2. 解析Word文档
-        logger.info("开始解析Word文档...")
+        logger.info("[2/3] 解析Word文档...")
         parser = DocxParser()
         doc_result = parser.parse_document(docx_path)
         
         # 3. AI审核
-        logger.info("开始AI审核...")
+        logger.info("[3/3] AI审核...")
         
         # 判断审核类型
         if review_type == 'complaint':
             # 申诉文档专用审核
-            logger.info("使用申诉文档专用审核流程...")
+            logger.debug("使用申诉文档专用审核流程")
             complaint_parser = ComplaintDocumentParser()
             parsed_doc = complaint_parser.parse_document(doc_result)
             
@@ -477,7 +476,6 @@ def review_document_sync():
             )
         
         # 4. 生成报告
-        logger.info("生成报告...")
         output_path = Path(app.config['OUTPUT_FOLDER']) / 'review_report'
         
         # 保存JSON报告
@@ -600,11 +598,6 @@ def clear_files():
 
 
 if __name__ == '__main__':
-    print("="*60)
     print("AI文档审核系统 - Web界面")
-    print("="*60)
     print(f"访问地址: http://localhost:5002")
-    print(f"配置信息:\n{config}")
-    print("="*60)
-    
     app.run(host='0.0.0.0', port=5002, debug=True)
